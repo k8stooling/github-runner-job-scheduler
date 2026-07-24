@@ -1,4 +1,6 @@
 import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -21,6 +23,8 @@ INIT_IMAGE = os.getenv("INIT_CONTAINER_IMAGE", "ghcr.io/actions/runner-token:lat
 RUNNER_TOKEN_DEST = os.getenv("GITHUB_RUNNER_TOKEN_DEST", "/runner-token/runner_token")
 GITHUB_URL = os.getenv("GITHUB_URL", "https://github.com")
 RUNNER_MAP_PATH = os.getenv("RUNNER_MAP_PATH", "/etc/github-runner-job-scheduler/repo-runner-map.yaml")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBHOOK_SECRET_REQUIRED = os.getenv("WEBHOOK_SECRET_REQUIRED", "true").lower() == "true"
 
 _batch_api: client.BatchV1Api | None = None
 _repo_map: dict[str, str] = {}
@@ -74,6 +78,25 @@ def sanitize_job_name(value: str) -> str:
     digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
     base = (slug[:40] if slug else "repo")
     return f"runner-{base}-{digest}"
+
+
+def verify_signature(body: bytes, signature_header: str | None) -> None:
+    if WEBHOOK_SECRET_REQUIRED and not WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="webhook secret is required but not configured")
+
+    if not WEBHOOK_SECRET:
+        return
+
+    if not signature_header:
+        raise HTTPException(status_code=401, detail="missing X-Hub-Signature-256 header")
+
+    expected = "sha256=" + hmac.new(
+        WEBHOOK_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature_header):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
 
 
 def build_job_manifest(repo_full_name: str, runner_label: str) -> client.V1Job:
@@ -165,11 +188,19 @@ def healthz() -> dict[str, str]:
 async def webhook(
     request: Request,
     x_github_event: str | None = Header(default=None),
+    x_hub_signature_256: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    raw_body = await request.body()
+    verify_signature(body=raw_body, signature_header=x_hub_signature_256)
+
     if x_github_event != "workflow_job":
         return {"accepted": False, "reason": "ignored event"}
 
-    payload = await request.json()
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON payload") from exc
+
     action = payload.get("action")
     if action != "queued":
         return {"accepted": False, "reason": "ignored action"}

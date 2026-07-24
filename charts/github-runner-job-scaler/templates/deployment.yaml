@@ -33,6 +33,13 @@ spec:
                   fieldPath: metadata.namespace
             - name: RUNNER_MAP_PATH
               value: {{ .Values.config.runnerMapPath | quote }}
+            - name: WEBHOOK_SECRET_REQUIRED
+              value: {{ ternary "true" "false" .Values.webhook.requireSignature | quote }}
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "github-runner-job-scheduler.webhookSecretName" . }}
+                  key: {{ .Values.webhook.secret.key | quote }}
             - name: RUNNER_IMAGE
               value: {{ .Values.runner.image | quote }}
             - name: INIT_CONTAINER_IMAGE

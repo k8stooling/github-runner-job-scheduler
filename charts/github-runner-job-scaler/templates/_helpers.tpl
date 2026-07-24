@@ -22,3 +22,11 @@
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "github-runner-job-scheduler.webhookSecretName" -}}
+{{- if .Values.webhook.secret.create -}}
+{{- printf "%s-webhook" (include "github-runner-job-scheduler.fullname" .) -}}
+{{- else -}}
+{{- required "webhook.secret.name is required when webhook.secret.create=false" .Values.webhook.secret.name -}}
+{{- end -}}
+{{- end -}}

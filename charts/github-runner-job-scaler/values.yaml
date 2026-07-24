@@ -16,6 +16,14 @@ config:
   repositories:
     k8stooling/repo: ubuntu-latest
 
+webhook:
+  requireSignature: true
+  secret:
+    create: false
+    name: ""
+    key: WEBHOOK_SECRET
+    value: ""
+
 replicaCount: 1
 
 serviceAccount:

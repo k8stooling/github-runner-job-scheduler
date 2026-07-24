@@ -6,6 +6,7 @@ FastAPI webhook scaler for GitHub Actions `workflow_job` queue events. It create
 
 - Listens on `POST /webhook`.
 - Accepts only `workflow_job` events with `action: queued`.
+- Verifies `X-Hub-Signature-256` using a shared webhook secret.
 - Uses a repository to runner-label YAML map loaded from a ConfigMap-mounted file.
 - Creates one Kubernetes Job via in-cluster ServiceAccount authentication.
 
@@ -21,6 +22,32 @@ config:
     runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
     repositories:
         k8stooling/repo: ubuntu-latest
+```
+
+## Webhook secret support
+
+For internet-facing endpoints, configure a GitHub webhook secret and provide it via Kubernetes Secret.
+
+Use an existing secret:
+
+```yaml
+webhook:
+    requireSignature: true
+    secret:
+        create: false
+        name: github-webhook-secret
+        key: WEBHOOK_SECRET
+```
+
+Or let Helm create it:
+
+```yaml
+webhook:
+    requireSignature: true
+    secret:
+        create: true
+        key: WEBHOOK_SECRET
+        value: "replace-with-strong-random-secret"
 ```
 
 ## Runner Job details
