@@ -1,0 +1,55 @@
+image:
+  repository: ghcr.io/k8stooling/github-runner-job-scheduler
+  tag: latest
+  pullPolicy: IfNotPresent
+
+runner:
+  image: actions-runner:latest
+  initImage: ghcr.io/k8stooling/github-runner-init:latest
+  serviceAccountName: default
+  githubSecretName: github-secrets
+  githubTokenKey: GITHUB_TOKEN
+  githubApiUrl: https://api.github.com
+
+config:
+  runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
+  repositories:
+    k8stooling/repo: ubuntu-latest
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+gateway:
+  enabled: false
+  create: false
+  name: ""
+  namespace: ""
+  gatewayClassName: ""
+  listener:
+    name: http
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: Same
+  hostnames: []
+  pathPrefix: /
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: github-runner-job-scheduler.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
