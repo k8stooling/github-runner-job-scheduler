@@ -80,14 +80,31 @@ def sanitize_job_name(value: str) -> str:
     return f"runner-{base}-{digest}"
 
 
-def verify_signature(body: bytes, signature_header: str | None) -> None:
+def sanitize_label(value: str) -> str:
+    # Kubernetes label values must consist of alphanumeric, '-', '_' or '.',
+    # and must start and end with an alphanumeric character.
+    if not isinstance(value, str):
+        return ""
+    v = re.sub(r"[^A-Za-z0-9-_.]", "-", value)
+    v = re.sub(r"^-+", "", v)
+    v = re.sub(r"-+$", "", v)
+    if not re.match(r"([A-Za-z0-9].*[A-Za-z0-9])$", v):
+        # fallback to a short hash when sanitization produces an invalid value
+        v = hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+    return v
+
+
+def verify_signature(body: bytes, signature_header: str | None, delivery_id: str | None) -> None:
     if WEBHOOK_SECRET_REQUIRED and not WEBHOOK_SECRET:
+        logger.error("webhook secret required but not configured delivery=%s", delivery_id)
         raise HTTPException(status_code=503, detail="webhook secret is required but not configured")
 
     if not WEBHOOK_SECRET:
+        logger.warning("webhook secret not set; signature verification disabled delivery=%s", delivery_id)
         return
 
     if not signature_header:
+        logger.warning("missing signature header delivery=%s", delivery_id)
         raise HTTPException(status_code=401, detail="missing X-Hub-Signature-256 header")
 
     expected = "sha256=" + hmac.new(
@@ -96,7 +113,10 @@ def verify_signature(body: bytes, signature_header: str | None) -> None:
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(expected, signature_header):
+        logger.warning("invalid signature delivery=%s", delivery_id)
         raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+    logger.info("signature verified delivery=%s", delivery_id)
 
 
 def build_job_manifest(repo_full_name: str, runner_label: str) -> client.V1Job:
@@ -160,7 +180,7 @@ def build_job_manifest(repo_full_name: str, runner_label: str) -> client.V1Job:
         labels={
             "app.kubernetes.io/name": "github-runner",
             "app.kubernetes.io/managed-by": "github-runner-job-scheduler",
-            "github.repository": repo_full_name,
+            "github.repository": sanitize_label(repo_full_name),
         },
     )
 
@@ -188,12 +208,20 @@ def healthz() -> dict[str, str]:
 async def webhook(
     request: Request,
     x_github_event: str | None = Header(default=None),
+    x_github_delivery: str | None = Header(default=None),
     x_hub_signature_256: str | None = Header(default=None),
 ) -> dict[str, Any]:
     raw_body = await request.body()
-    verify_signature(body=raw_body, signature_header=x_hub_signature_256)
+    logger.info(
+        "webhook received delivery=%s event=%s signature_present=%s",
+        x_github_delivery,
+        x_github_event,
+        bool(x_hub_signature_256),
+    )
+    verify_signature(body=raw_body, signature_header=x_hub_signature_256, delivery_id=x_github_delivery)
 
     if x_github_event != "workflow_job":
+        logger.info("ignored event delivery=%s event=%s", x_github_delivery, x_github_event)
         return {"accepted": False, "reason": "ignored event"}
 
     try:
@@ -203,6 +231,7 @@ async def webhook(
 
     action = payload.get("action")
     if action != "queued":
+        logger.info("ignored action delivery=%s action=%s", x_github_delivery, action)
         return {"accepted": False, "reason": "ignored action"}
 
     repo_full_name = payload.get("repository", {}).get("full_name")
@@ -211,14 +240,17 @@ async def webhook(
 
     runner_label = get_repo_runner_map().get(repo_full_name)
     if not runner_label:
+        logger.warning("repository not mapped delivery=%s repository=%s", x_github_delivery, repo_full_name)
         return {"accepted": False, "reason": "repository not mapped"}
 
     job_manifest = build_job_manifest(repo_full_name=repo_full_name, runner_label=runner_label)
     try:
         created = get_batch_api().create_namespaced_job(namespace=NAMESPACE, body=job_manifest)
     except ApiException as exc:
-        logger.exception("failed creating runner job")
+        logger.exception("failed creating runner job delivery=%s repository=%s", x_github_delivery, repo_full_name)
         raise HTTPException(status_code=500, detail=f"job creation failed: {exc.reason}") from exc
+
+    logger.info("job created delivery=%s repository=%s job=%s", x_github_delivery, repo_full_name, created.metadata.name if created and created.metadata else None)
 
     return {
         "accepted": True,
