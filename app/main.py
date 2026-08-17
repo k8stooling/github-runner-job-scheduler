@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import copy
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 WEBHOOK_SECRET_REQUIRED = os.getenv("WEBHOOK_SECRET_REQUIRED", "true").lower() == "true"
 
 _batch_api: client.BatchV1Api | None = None
-_repo_map: dict[str, str] = {}
+_repo_map: dict[str, dict[str, Any]] = {}
 _repo_map_mtime: float | None = None
 
 
@@ -39,7 +40,103 @@ def get_batch_api() -> client.BatchV1Api:
     return _batch_api
 
 
-def get_repo_runner_map() -> dict[str, str]:
+def normalize_labels(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+
+    if isinstance(value, list):
+        labels = [str(item).strip() for item in value if str(item).strip()]
+        if labels:
+            return ",".join(labels)
+
+    return None
+
+
+def normalize_repo_config(repo_full_name: str, raw_config: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_config, dict):
+        logger.warning("invalid hook config for %s: expected mapping", repo_full_name)
+        return None
+
+    registration_scope = str(raw_config.get("registrationScope", "")).strip().lower()
+    if registration_scope not in {"repository", "organization"}:
+        logger.warning(
+            "invalid registrationScope for %s: %s",
+            repo_full_name,
+            raw_config.get("registrationScope"),
+        )
+        return None
+
+    labels = normalize_labels(raw_config.get("labels"))
+    if not labels:
+        logger.warning("missing or invalid labels for %s", repo_full_name)
+        return None
+
+    organization = raw_config.get("organization")
+    if registration_scope == "organization":
+        if not isinstance(organization, str) or not organization.strip():
+            logger.warning("organization scope requires organization for %s", repo_full_name)
+            return None
+        organization = organization.strip()
+    else:
+        organization = None
+
+    normalized: dict[str, Any] = {
+        "labels": labels,
+        "registrationScope": registration_scope,
+    }
+
+    if organization:
+        normalized["organization"] = organization
+
+    string_fields = {
+        "githubUrl",
+        "githubApiUrl",
+        "serviceAccountName",
+    }
+    bool_fields = {"automountServiceAccountToken"}
+    list_fields = {"volumes", "volumeMounts", "initContainers", "env"}
+    dict_fields = {"resources", "podSecurityContext", "containerSecurityContext"}
+
+    for field in string_fields:
+        value = raw_config.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            logger.warning("invalid %s for %s", field, repo_full_name)
+            return None
+        normalized[field] = value.strip()
+
+    for field in bool_fields:
+        value = raw_config.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            logger.warning("invalid %s for %s: expected boolean", field, repo_full_name)
+            return None
+        normalized[field] = value
+
+    for field in list_fields:
+        value = raw_config.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            logger.warning("invalid %s for %s: expected list", field, repo_full_name)
+            return None
+        normalized[field] = copy.deepcopy(value)
+
+    for field in dict_fields:
+        value = raw_config.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            logger.warning("invalid %s for %s: expected mapping", field, repo_full_name)
+            return None
+        normalized[field] = copy.deepcopy(value)
+
+    return normalized
+
+
+def get_repo_runner_map() -> dict[str, dict[str, Any]]:
     global _repo_map
     global _repo_map_mtime
 
@@ -62,11 +159,19 @@ def get_repo_runner_map() -> dict[str, str]:
         _repo_map_mtime = stat.st_mtime
         return _repo_map
 
-    _repo_map = {
-        str(repo): str(label)
-        for repo, label in map_root.items()
-        if isinstance(repo, str) and isinstance(label, str)
-    }
+    normalized_map: dict[str, dict[str, Any]] = {}
+    for repo, raw_config in map_root.items():
+        if not isinstance(repo, str):
+            logger.warning("invalid repository key in %s: %r", RUNNER_MAP_PATH, repo)
+            continue
+
+        normalized_config = normalize_repo_config(repo_full_name=repo, raw_config=raw_config)
+        if normalized_config is None:
+            continue
+
+        normalized_map[repo] = normalized_config
+
+    _repo_map = normalized_map
     _repo_map_mtime = stat.st_mtime
     logger.info("loaded %d repository runner mappings", len(_repo_map))
     return _repo_map
@@ -119,84 +224,126 @@ def verify_signature(body: bytes, signature_header: str | None, delivery_id: str
     logger.info("signature verified delivery=%s", delivery_id)
 
 
-def build_job_manifest(repo_full_name: str, runner_label: str) -> client.V1Job:
+def build_job_manifest(repo_full_name: str, hook_config: dict[str, Any]) -> dict[str, Any]:
     job_name = sanitize_job_name(repo_full_name)
-    repo_url = f"{GITHUB_URL.rstrip('/')}/{repo_full_name}"
+    github_url = str(hook_config.get("githubUrl", GITHUB_URL)).rstrip("/")
+    github_api_url = str(
+        hook_config.get("githubApiUrl", os.getenv("GITHUB_API_URL", "https://api.github.com"))
+    )
+    registration_scope = hook_config["registrationScope"]
+    runner_labels = hook_config["labels"]
+
+    registration_env = [
+        {"name": "GITHUB_REPOSITORY", "value": repo_full_name},
+    ]
+    registration_url = f"{github_url}/{repo_full_name}"
+
+    if registration_scope == "organization":
+        registration_env = [
+            {"name": "GITHUB_ORGANIZATION", "value": hook_config["organization"]},
+        ]
+        registration_url = f"{github_url}/{hook_config['organization']}"
 
     volumes = [
-        client.V1Volume(name="runner-token", empty_dir=client.V1EmptyDirVolumeSource()),
-        client.V1Volume(name="runner-work", empty_dir=client.V1EmptyDirVolumeSource()),
+        {"name": "runner-token", "emptyDir": {}},
+        {"name": "runner-work", "emptyDir": {}},
     ]
+    volumes.extend(copy.deepcopy(hook_config.get("volumes", [])))
 
     volume_mounts = [
-        client.V1VolumeMount(name="runner-token", mount_path="/runner-token"),
-        client.V1VolumeMount(name="runner-work", mount_path="/_work"),
+        {"name": "runner-token", "mountPath": "/runner-token"},
+        {"name": "runner-work", "mountPath": "/_work"},
     ]
+    volume_mounts.extend(copy.deepcopy(hook_config.get("volumeMounts", [])))
 
-    init_container = client.V1Container(
-        name="init-runner-token",
-        image=INIT_IMAGE,
-        image_pull_policy="IfNotPresent",
-        env=[
-            client.V1EnvVar(name="GITHUB_REPOSITORY", value=repo_full_name),
-            client.V1EnvVar(name="GITHUB_RUNNER_TOKEN_DEST", value=RUNNER_TOKEN_DEST),
-            client.V1EnvVar(name="GITHUB_URL", value=os.getenv("GITHUB_API_URL", "https://api.github.com")),
-            client.V1EnvVar(
-                name="GITHUB_TOKEN",
-                value_from=client.V1EnvVarSource(
-                    secret_key_ref=client.V1SecretKeySelector(
-                        name=os.getenv("GITHUB_SECRET_NAME", "github-secrets"),
-                        key=os.getenv("GITHUB_TOKEN_KEY", "GITHUB_TOKEN"),
-                    )
-                ),
-            ),
+    init_container = {
+        "name": "init-runner-token",
+        "image": INIT_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "env": registration_env
+        + [
+            {"name": "GITHUB_RUNNER_TOKEN_DEST", "value": RUNNER_TOKEN_DEST},
+            {"name": "GITHUB_URL", "value": github_api_url},
+            {
+                "name": "GITHUB_TOKEN",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": os.getenv("GITHUB_SECRET_NAME", "github-secrets"),
+                        "key": os.getenv("GITHUB_TOKEN_KEY", "GITHUB_TOKEN"),
+                    }
+                },
+            },
         ],
-        volume_mounts=[client.V1VolumeMount(name="runner-token", mount_path="/runner-token")],
-    )
+        "volumeMounts": [{"name": "runner-token", "mountPath": "/runner-token"}],
+    }
 
-    run_container = client.V1Container(
-        name="runner",
-        image=JOB_IMAGE,
-        image_pull_policy="IfNotPresent",
-        command=["/bin/bash", "-c"],
-        args=[
+    init_containers = [init_container]
+    init_containers.extend(copy.deepcopy(hook_config.get("initContainers", [])))
+
+    run_container: dict[str, Any] = {
+        "name": "runner",
+        "image": JOB_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["/bin/bash", "-c"],
+        "args": [
             "/app/config.sh --unattended --ephemeral --url "
-            f"{repo_url} --token $(cat {RUNNER_TOKEN_DEST}) --labels {runner_label} "
+            f"{registration_url} --token $(cat {RUNNER_TOKEN_DEST}) --labels {runner_labels} "
             "&& /app/run.sh"
         ],
-        volume_mounts=volume_mounts,
-    )
+        "volumeMounts": volume_mounts,
+    }
 
-    pod_spec = client.V1PodSpec(
-        restart_policy="Never",
-        service_account_name=os.getenv("SERVICE_ACCOUNT_NAME", "default"),
-        init_containers=[init_container],
-        containers=[run_container],
-        volumes=volumes,
-    )
+    extra_env = copy.deepcopy(hook_config.get("env", []))
+    if extra_env:
+        run_container["env"] = extra_env
 
-    metadata = client.V1ObjectMeta(
-        name=job_name,
-        labels={
+    resources = hook_config.get("resources")
+    if resources:
+        run_container["resources"] = copy.deepcopy(resources)
+
+    container_security_context = hook_config.get("containerSecurityContext")
+    if container_security_context:
+        run_container["securityContext"] = copy.deepcopy(container_security_context)
+
+    pod_spec: dict[str, Any] = {
+        "restartPolicy": "Never",
+        "serviceAccountName": hook_config.get(
+            "serviceAccountName", os.getenv("SERVICE_ACCOUNT_NAME", "default")
+        ),
+        "initContainers": init_containers,
+        "containers": [run_container],
+        "volumes": volumes,
+    }
+
+    if "automountServiceAccountToken" in hook_config:
+        pod_spec["automountServiceAccountToken"] = hook_config["automountServiceAccountToken"]
+
+    pod_security_context = hook_config.get("podSecurityContext")
+    if pod_security_context:
+        pod_spec["securityContext"] = copy.deepcopy(pod_security_context)
+
+    metadata = {
+        "name": job_name,
+        "labels": {
             "app.kubernetes.io/name": "github-runner",
             "app.kubernetes.io/managed-by": "github-runner-job-scheduler",
             "github.repository": sanitize_label(repo_full_name),
         },
-    )
+    }
 
-    return client.V1Job(
-        api_version="batch/v1",
-        kind="Job",
-        metadata=metadata,
-        spec=client.V1JobSpec(
-            ttl_seconds_after_finished=100,
-            backoff_limit=0,
-            template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels={"job-name": job_name}),
-                spec=pod_spec,
-            ),
-        ),
-    )
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": metadata,
+        "spec": {
+            "ttlSecondsAfterFinished": 100,
+            "backoffLimit": 0,
+            "template": {
+                "metadata": {"labels": {"job-name": job_name}},
+                "spec": pod_spec,
+            },
+        },
+    }
 
 
 @app.get("/healthz")
@@ -238,12 +385,12 @@ async def webhook(
     if not repo_full_name:
         raise HTTPException(status_code=400, detail="repository.full_name is missing")
 
-    runner_label = get_repo_runner_map().get(repo_full_name)
-    if not runner_label:
+    hook_config = get_repo_runner_map().get(repo_full_name)
+    if not hook_config:
         logger.warning("repository not mapped delivery=%s repository=%s", x_github_delivery, repo_full_name)
         return {"accepted": False, "reason": "repository not mapped"}
 
-    job_manifest = build_job_manifest(repo_full_name=repo_full_name, runner_label=runner_label)
+    job_manifest = build_job_manifest(repo_full_name=repo_full_name, hook_config=hook_config)
     try:
         created = get_batch_api().create_namespaced_job(namespace=NAMESPACE, body=job_manifest)
     except ApiException as exc:
@@ -256,6 +403,7 @@ async def webhook(
         "accepted": True,
         "job": created.metadata.name if created and created.metadata else None,
         "repository": repo_full_name,
-        "label": runner_label,
+        "labels": hook_config["labels"],
+        "registrationScope": hook_config["registrationScope"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

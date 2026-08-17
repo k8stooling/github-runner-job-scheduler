@@ -21,7 +21,82 @@ Example values snippet:
 config:
     runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
     repositories:
-        k8stooling/repo: ubuntu-latest
+        k8stooling/repo:
+            labels:
+                - ubuntu-latest
+            registrationScope: repository
+```
+
+Each repository entry is a hook configuration object.
+
+- `labels`: string or list of labels passed to `config.sh --labels`
+- `registrationScope`: `repository` or `organization`
+- `organization`: required when `registrationScope=organization`
+- `serviceAccountName`: optional per-runner Job service account override
+- `automountServiceAccountToken`: optional per-runner Job boolean
+- `volumes`, `volumeMounts`, `initContainers`, `env`, `resources`: optional Kubernetes-style fragments merged into the generated Job pod
+- `githubUrl`, `githubApiUrl`: optional per-hook overrides for GitHub Enterprise targets
+
+Repository scope registers the runner against `<githubUrl>/<owner>/<repo>`.
+Organization scope registers the runner against `<githubUrl>/<organization>`.
+
+Example with a richer Ansible runner pod:
+
+```yaml
+config:
+    runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
+    repositories:
+        VFCPS-CaaS/systems-inventory:
+            labels:
+                - ci-automation
+            registrationScope: repository
+            serviceAccountName: default
+            automountServiceAccountToken: false
+            volumes:
+                - name: aws-profile
+                    configMap:
+                        name: aws-profile
+                        defaultMode: 420
+                - name: runner-home
+                    emptyDir: {}
+                - name: automation-jobs-artifacts
+                    persistentVolumeClaim:
+                        claimName: automation-jobs-artifacts
+            initContainers:
+                - name: copy-aws-profile
+                    image: public.ecr.aws/docker/library/busybox:latest
+                    command: ["/bin/sh", "-c"]
+                    args:
+                        - |
+                            mkdir -p /home-runner/.aws &&
+                            cat /aws/config > /home-runner/.aws/config &&
+                            cat /aws/credentials > /home-runner/.aws/credentials &&
+                            chown -R 1000:1000 /home-runner/.aws &&
+                            chmod 755 /home-runner/.aws &&
+                            chmod 644 /home-runner/.aws/*
+                    volumeMounts:
+                        - name: aws-profile
+                            mountPath: /aws
+                        - name: runner-home
+                            mountPath: /home-runner
+            env:
+                - name: ANSIBLE_CALLBACK_PLUGINS
+                    value: /usr/local/lib/python3.12/site-packages/ara/plugins/callback
+                - name: ARA_API_CLIENT
+                    value: http
+                - name: ARA_API_SERVER
+                    value: http://ara-server:8000
+            volumeMounts:
+                - name: aws-profile
+                    mountPath: /aws
+                - name: runner-home
+                    mountPath: /runner
+                - name: automation-jobs-artifacts
+                    mountPath: /runner/artifacts
+            resources:
+                requests:
+                    cpu: 250m
+                    memory: 500Mi
 ```
 
 ## Webhook secret support
@@ -55,7 +130,9 @@ webhook:
 - `ttlSecondsAfterFinished: 100`
 - `initContainer`: defaults to `ghcr.io/actions/runner-token:latest` (override with `INIT_CONTAINER_IMAGE`)
 - `runner container`: image from `RUNNER_IMAGE`
-- runner args include `--ephemeral --url <repo>`
+- runner args include `--ephemeral --url <repo-or-org-target>`
+- base Job volumes always include `runner-token` and `runner-work`
+- additional pod fragments come from the matching repository hook entry
 
 ## Build
 
@@ -65,7 +142,7 @@ docker build -t ghcr.io/k8stooling/github-runner-job-scheduler:latest .
 
 ## Helm
 
-Chart path: `charts/github-runner-job-scheduler`
+Chart path: `charts/github-runner-job-scaler`
 
 - Enable Gateway API route: `gateway.enabled=true`
 - Create a Gateway from this chart: `gateway.enabled=true` and `gateway.create=true`

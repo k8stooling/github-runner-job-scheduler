@@ -18,10 +18,14 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ include "github-runner-job-scheduler.serviceAccountName" . }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | indent 8 }}
       containers:
         - name: scaler
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | indent 12 }}
           ports:
             - name: http
               containerPort: 8000
@@ -52,6 +56,8 @@ spec:
               value: {{ .Values.runner.githubTokenKey | quote }}
             - name: GITHUB_API_URL
               value: {{ .Values.runner.githubApiUrl | quote }}
+            - name: GITHUB_URL
+              value: {{ .Values.runner.githubUrl | quote }}
           volumeMounts:
             - name: repo-runner-map
               mountPath: /etc/github-runner-job-scheduler

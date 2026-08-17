@@ -1,0 +1,41 @@
+{{- $ky := default (dict) .Values.kyverno }}
+{{- if ($ky.createPolicyException | default true) }}
+apiVersion: kyverno.io/v2
+kind: PolicyException
+metadata:
+  name: {{ include "github-runner-job-scheduler.fullname" . }}-allow-runner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service | default "helm" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  background: true
+  exceptions:
+  - policyName: disallow-capabilities-strict
+    ruleNames:
+    - require-drop-all
+    - adding-capabilities-strict
+    - autogen-require-drop-all
+    - autogen-adding-capabilities-strict
+  - policyName: disallow-privilege-escalation
+    ruleNames:
+    - privilege-escalation
+    - autogen-privilege-escalation
+  - policyName: require-run-as-nonroot
+    ruleNames:
+    - run-as-non-root
+    - autogen-run-as-non-root
+  - policyName: restrict-seccomp-strict
+    ruleNames:
+    - check-seccomp-strict
+    - autogen-check-seccomp-strict
+  match:
+    any:
+    - resources:
+        kinds:
+        - Job
+        - Pod
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: github-runner
+{{- end }}

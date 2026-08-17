@@ -10,11 +10,12 @@ runner:
   githubSecretName: github-secrets
   githubTokenKey: GITHUB_TOKEN
   githubApiUrl: https://api.github.com
+  githubUrl: https://github.vodafone.com
 
 config:
   runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
-  repositories:
-    k8stooling/repo: ubuntu-latest
+  repositories: {}
+
 
 webhook:
   requireSignature: true
@@ -25,6 +26,25 @@ webhook:
     value: ""
 
 replicaCount: 1
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
 
 serviceAccount:
   create: true
