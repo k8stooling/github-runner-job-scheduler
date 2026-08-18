@@ -237,8 +237,11 @@ def verify_signature(body: bytes, signature_header: str | None, delivery_id: str
     logger.info("signature verified delivery=%s", delivery_id)
 
 
-def build_job_manifest(repo_full_name: str, hook_config: dict[str, Any]) -> dict[str, Any]:
-    job_name = sanitize_job_name(repo_full_name)
+def build_job_manifest(
+    repo_full_name: str, hook_config: dict[str, Any], delivery_id: str
+) -> dict[str, Any]:
+    # Use delivery_id to ensure unique job names for each webhook
+    job_name = sanitize_job_name(f"{repo_full_name}-{delivery_id[:8]}")
     github_url = str(hook_config.get("githubUrl", GITHUB_URL)).rstrip("/")
     github_api_url = str(
         hook_config.get("githubApiUrl", os.getenv("GITHUB_API_URL", "https://api.github.com"))
@@ -405,7 +408,11 @@ async def webhook(
         logger.warning("repository not mapped delivery=%s repository=%s", x_github_delivery, repo_full_name)
         return {"accepted": False, "reason": "repository not mapped"}
 
-    job_manifest = build_job_manifest(repo_full_name=repo_full_name, hook_config=hook_config)
+    job_manifest = build_job_manifest(
+        repo_full_name=repo_full_name,
+        hook_config=hook_config,
+        delivery_id=x_github_delivery,
+    )
     try:
         created = get_batch_api().create_namespaced_job(namespace=NAMESPACE, body=job_manifest)
     except ApiException as exc:
