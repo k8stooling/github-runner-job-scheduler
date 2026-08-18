@@ -12,6 +12,10 @@ runner:
   githubApiUrl: https://api.github.com
   githubUrl: https://github.vodafone.com
 
+job:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 3600
+
 config:
   runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
   repositories: {}

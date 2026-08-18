@@ -58,6 +58,10 @@ spec:
               value: {{ .Values.runner.githubApiUrl | quote }}
             - name: GITHUB_URL
               value: {{ .Values.runner.githubUrl | quote }}
+            - name: JOB_BACKOFF_LIMIT
+              value: {{ .Values.job.backoffLimit | quote }}
+            - name: JOB_TTL_SECONDS
+              value: {{ .Values.job.ttlSecondsAfterFinished | quote }}
           volumeMounts:
             - name: repo-runner-map
               mountPath: /etc/github-runner-job-scheduler

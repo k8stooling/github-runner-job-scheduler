@@ -39,6 +39,8 @@ GITHUB_URL = os.getenv("GITHUB_URL", "https://github.com")
 RUNNER_MAP_PATH = os.getenv("RUNNER_MAP_PATH", "/etc/github-runner-job-scheduler/repo-runner-map.yaml")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 WEBHOOK_SECRET_REQUIRED = os.getenv("WEBHOOK_SECRET_REQUIRED", "true").lower() == "true"
+JOB_BACKOFF_LIMIT = int(os.getenv("JOB_BACKOFF_LIMIT", "10"))
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "86400"))
 
 _batch_api: client.BatchV1Api | None = None
 _repo_map: dict[str, dict[str, Any]] = {}
@@ -238,7 +240,13 @@ def verify_signature(body: bytes, signature_header: str | None, delivery_id: str
 
 
 def build_job_manifest(
-    repo_full_name: str, hook_config: dict[str, Any], delivery_id: str
+    repo_full_name: str,
+    hook_config: dict[str, Any],
+    delivery_id: str,
+    workflow_job_id: int | None = None,
+    workflow_run_id: int | None = None,
+    workflow_job_name: str | None = None,
+    requested_labels: str | list[str] | None = None,
 ) -> dict[str, Any]:
     # Use delivery_id to ensure unique job names for each webhook
     job_name = sanitize_job_name(f"{repo_full_name}-{delivery_id[:8]}")
@@ -345,6 +353,18 @@ def build_job_manifest(
             "app.kubernetes.io/managed-by": "github-runner-job-scheduler",
             "github.repository": sanitize_label(repo_full_name),
         },
+        "annotations": {
+            "scheduler.github.delivery_id": delivery_id,
+            "scheduler.github.workflow_job_id": str(workflow_job_id or ""),
+            "scheduler.github.workflow_run_id": str(workflow_run_id or ""),
+            "scheduler.github.workflow_job_name": workflow_job_name or "",
+            "scheduler.github.requested_labels": (
+                ",".join(requested_labels)
+                if isinstance(requested_labels, list)
+                else str(requested_labels or "")
+            ),
+            "scheduler.created_at": datetime.now(timezone.utc).isoformat(),
+        },
     }
 
     return {
@@ -352,10 +372,21 @@ def build_job_manifest(
         "kind": "Job",
         "metadata": metadata,
         "spec": {
-            "ttlSecondsAfterFinished": 100,
-            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": JOB_TTL_SECONDS,
+            "backoffLimit": JOB_BACKOFF_LIMIT,
             "template": {
-                "metadata": {"labels": {"job-name": job_name}},
+                "metadata": {
+                    "labels": {
+                        "job-name": job_name,
+                        "github.repository": sanitize_label(repo_full_name),
+                    },
+                    "annotations": {
+                        "scheduler.github.delivery_id": delivery_id,
+                        "scheduler.github.workflow_job_id": str(workflow_job_id or ""),
+                        "scheduler.github.workflow_run_id": str(workflow_run_id or ""),
+                        "scheduler.github.workflow_job_name": workflow_job_name or "",
+                    },
+                },
                 "spec": pod_spec,
             },
         },
@@ -399,9 +430,25 @@ async def webhook(
         logger.info("ignored action delivery=%s action=%s", x_github_delivery, action)
         return {"accepted": False, "reason": "ignored action"}
 
+    workflow_job = payload.get("workflow_job") if isinstance(payload.get("workflow_job"), dict) else {}
+    workflow_job_id = workflow_job.get("id")
+    workflow_run_id = workflow_job.get("run_id")
+    workflow_job_name = workflow_job.get("name")
+    requested_labels = workflow_job.get("labels")
+
     repo_full_name = payload.get("repository", {}).get("full_name")
     if not repo_full_name:
         raise HTTPException(status_code=400, detail="repository.full_name is missing")
+
+    logger.info(
+        "workflow_job queued delivery=%s repository=%s workflow_job_id=%s run_id=%s name=%s labels=%s",
+        x_github_delivery,
+        repo_full_name,
+        workflow_job_id,
+        workflow_run_id,
+        workflow_job_name,
+        requested_labels,
+    )
 
     hook_config = get_repo_runner_map().get(repo_full_name)
     if not hook_config:
@@ -412,6 +459,10 @@ async def webhook(
         repo_full_name=repo_full_name,
         hook_config=hook_config,
         delivery_id=x_github_delivery,
+        workflow_job_id=workflow_job_id if isinstance(workflow_job_id, int) else None,
+        workflow_run_id=workflow_run_id if isinstance(workflow_run_id, int) else None,
+        workflow_job_name=workflow_job_name if isinstance(workflow_job_name, str) else None,
+        requested_labels=requested_labels if isinstance(requested_labels, (str, list)) else None,
     )
     try:
         created = get_batch_api().create_namespaced_job(namespace=NAMESPACE, body=job_manifest)
@@ -419,7 +470,14 @@ async def webhook(
         logger.exception("failed creating runner job delivery=%s repository=%s", x_github_delivery, repo_full_name)
         raise HTTPException(status_code=500, detail=f"job creation failed: {exc.reason}") from exc
 
-    logger.info("job created delivery=%s repository=%s job=%s", x_github_delivery, repo_full_name, created.metadata.name if created and created.metadata else None)
+    logger.info(
+        "job created delivery=%s repository=%s workflow_job_id=%s run_id=%s job=%s",
+        x_github_delivery,
+        repo_full_name,
+        workflow_job_id,
+        workflow_run_id,
+        created.metadata.name if created and created.metadata else None,
+    )
 
     return {
         "accepted": True,
