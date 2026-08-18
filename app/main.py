@@ -14,9 +14,22 @@ from kubernetes import client, config
 from kubernetes.client import ApiException
 import yaml
 
+class HealthzFilter(logging.Filter):
+    """Filter to suppress healthz access logs unless in DEBUG mode."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "GET /healthz" in record.getMessage():
+            return logging.getLogger("github-runner-job-scheduler").isEnabledFor(
+                logging.DEBUG
+            )
+        return True
+
+
 app = FastAPI(title="github-runner-job-scheduler", version="1.0.0")
 logger = logging.getLogger("github-runner-job-scheduler")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# Add filter to suppress healthz logs unless in DEBUG mode
+logging.getLogger("uvicorn.access").addFilter(HealthzFilter())
 
 NAMESPACE = os.getenv("POD_NAMESPACE", "default")
 JOB_IMAGE = os.getenv("RUNNER_IMAGE", "actions-runner:latest")
@@ -348,6 +361,8 @@ def build_job_manifest(repo_full_name: str, hook_config: dict[str, Any]) -> dict
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("healthz requested")
     return {"status": "ok"}
 
 
