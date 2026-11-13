@@ -124,6 +124,24 @@ def normalize_repo_config(repo_full_name: str, raw_config: Any) -> dict[str, Any
             return None
         normalized[field] = value.strip()
 
+    secret_ref = raw_config.get("githubTokenSecretRef")
+    if secret_ref is not None:
+        if (
+            not isinstance(secret_ref, dict)
+            or not isinstance(secret_ref.get("name"), str)
+            or not secret_ref["name"].strip()
+            or not isinstance(secret_ref.get("key"), str)
+            or not secret_ref["key"].strip()
+        ):
+            logger.warning(
+                "invalid githubTokenSecretRef for %s: expected name and key", repo_full_name
+            )
+            return None
+        normalized["githubTokenSecretRef"] = {
+            "name": secret_ref["name"].strip(),
+            "key": secret_ref["key"].strip(),
+        }
+
     for field in bool_fields:
         value = raw_config.get(field)
         if value is None:
@@ -154,6 +172,7 @@ def normalize_repo_config(repo_full_name: str, raw_config: Any) -> dict[str, Any
     return normalized
 
 
+CONNECTION_FIELDS = ("githubUrl", "githubApiUrl", "githubTokenSecretRef")
 _jinja_env = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
 _SINGLE_EXPR = re.compile(r"^\s*\{\{(?P<expr>(?:(?!\{\{|\}\}).)+)\}\}\s*$", re.DOTALL)
 
@@ -217,8 +236,14 @@ def resolve_repo_config(
         )
         return None
 
-    # overrides replace top-level fields of the rendered definition
-    return {**rendered, **copy.deepcopy(overrides)}
+    # repo-level GitHub connection settings win over the definition,
+    # overrides replace any top-level field of the rendered definition
+    connection = {
+        key: copy.deepcopy(repo_entry[key])
+        for key in CONNECTION_FIELDS
+        if repo_entry.get(key) is not None
+    }
+    return {**rendered, **connection, **copy.deepcopy(overrides)}
 
 
 def get_repo_runner_map() -> dict[str, dict[str, Any]]:
@@ -329,6 +354,10 @@ def build_job_manifest(
     github_api_url = str(
         hook_config.get("githubApiUrl", os.getenv("GITHUB_API_URL", "https://api.github.com"))
     )
+    token_secret = hook_config.get("githubTokenSecretRef") or {
+        "name": os.getenv("GITHUB_SECRET_NAME", "github-secrets"),
+        "key": os.getenv("GITHUB_TOKEN_KEY", "GITHUB_TOKEN"),
+    }
     registration_scope = hook_config["registrationScope"]
     runner_labels = hook_config["labels"]
 
@@ -367,8 +396,8 @@ def build_job_manifest(
                 "name": "GITHUB_TOKEN",
                 "valueFrom": {
                     "secretKeyRef": {
-                        "name": os.getenv("GITHUB_SECRET_NAME", "github-secrets"),
-                        "key": os.getenv("GITHUB_TOKEN_KEY", "GITHUB_TOKEN"),
+                        "name": token_secret["name"],
+                        "key": token_secret["key"],
                     }
                 },
             },

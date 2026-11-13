@@ -31,6 +31,11 @@ config:
     repositories:
         k8stooling/repo:
             jobDefinition: basic
+            githubUrl: https://github.com
+            githubApiUrl: https://api.github.com
+            githubTokenSecretRef:
+                name: ghec-pat
+                key: GITHUB_TOKEN
             variables:
                 runner_label: ubuntu-latest
             overrides:
@@ -43,6 +48,7 @@ with `jobDefinition: <key>` (required).
 - Definition string values are Jinja2 templates (sandboxed, undefined variables are an error and the repository is skipped).
 - A value that is exactly one `{{ expr }}` keeps its native type (list, number, boolean).
 - `variables`: per-repository values available to the templates. Built-ins: `repository`, `owner`, `repo_name`.
+- `githubUrl`, `githubApiUrl`, `githubTokenSecretRef`: optional per-repository GitHub target and PAT secret reference (set on the repository entry, not templated; they take precedence over the definition).
 - `overrides`: optional top-level fields that replace the rendered definition's fields for that repository (applied after rendering, not templated).
 
 A rendered job definition is a hook configuration object with these fields:
@@ -53,7 +59,8 @@ A rendered job definition is a hook configuration object with these fields:
 - `serviceAccountName`: optional per-runner Job service account override
 - `automountServiceAccountToken`: optional per-runner Job boolean
 - `volumes`, `volumeMounts`, `initContainers`, `env`, `resources`: optional Kubernetes-style fragments merged into the generated Job pod
-- `githubUrl`, `githubApiUrl`: optional per-hook overrides for GitHub Enterprise targets
+- `githubUrl`, `githubApiUrl`: optional GitHub target (e.g. GHE vs GHEC); default to the chart `runner.githubUrl` / `runner.githubApiUrl`
+- `githubTokenSecretRef`: optional `{name, key}` of the Secret holding the PAT used to request the registration token; defaults to `runner.githubSecretName` / `runner.githubTokenKey`
 
 Repository scope registers the runner against `<githubUrl>/<owner>/<repo>`.
 Organization scope registers the runner against `<githubUrl>/<organization>`.

@@ -2,5 +2,5 @@ apiVersion: v2
 name: github-runner-job-scheduler
 description: FastAPI webhook scaler for ephemeral GitHub runners
 type: application
-version: 2026.7.24
+version: 2026.11.13
 appVersion: "latest"
