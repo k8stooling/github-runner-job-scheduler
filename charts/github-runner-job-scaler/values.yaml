@@ -18,6 +18,7 @@ job:
 
 config:
   runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
+  jobDefinitions: {}
   repositories: {}
 
 

@@ -13,6 +13,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from kubernetes import client, config
 from kubernetes.client import ApiException
 import yaml
+from jinja2 import StrictUndefined
+from jinja2.exceptions import TemplateError
+from jinja2.sandbox import SandboxedEnvironment
 
 class HealthzFilter(logging.Filter):
     """Filter to suppress healthz access logs unless in DEBUG mode."""
@@ -151,6 +154,73 @@ def normalize_repo_config(repo_full_name: str, raw_config: Any) -> dict[str, Any
     return normalized
 
 
+_jinja_env = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
+_SINGLE_EXPR = re.compile(r"^\s*\{\{(?P<expr>(?:(?!\{\{|\}\}).)+)\}\}\s*$", re.DOTALL)
+
+
+def render_value(value: Any, variables: dict[str, Any]) -> Any:
+    """Recursively render Jinja2 strings. A string that is exactly one
+    `{{ expr }}` keeps the native type of the expression (list, int, bool...)."""
+    if isinstance(value, str):
+        match = _SINGLE_EXPR.match(value)
+        if match:
+            return _jinja_env.compile_expression(
+                match.group("expr").strip(), undefined_to_none=False
+            )(**variables)
+        if "{{" in value or "{%" in value:
+            return _jinja_env.from_string(value).render(**variables)
+        return value
+    if isinstance(value, list):
+        return [render_value(item, variables) for item in value]
+    if isinstance(value, dict):
+        return {key: render_value(item, variables) for key, item in value.items()}
+    return value
+
+
+def resolve_repo_config(
+    repo_full_name: str, repo_entry: Any, definitions: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not isinstance(repo_entry, dict):
+        logger.warning("invalid repository entry for %s: expected mapping", repo_full_name)
+        return None
+
+    definition_name = repo_entry.get("jobDefinition")
+    template = definitions.get(definition_name) if isinstance(definition_name, str) else None
+    if not isinstance(template, dict):
+        logger.warning(
+            "unknown jobDefinition for %s: %r", repo_full_name, definition_name
+        )
+        return None
+
+    variables = repo_entry.get("variables") or {}
+    overrides = repo_entry.get("overrides") or {}
+    if not isinstance(variables, dict) or not isinstance(overrides, dict):
+        logger.warning("variables and overrides must be mappings for %s", repo_full_name)
+        return None
+
+    owner, _, repo_name = repo_full_name.partition("/")
+    context = {
+        **variables,
+        "repository": repo_full_name,
+        "owner": owner,
+        "repo_name": repo_name,
+    }
+
+    try:
+        rendered = render_value(template, context)
+    except TemplateError as exc:
+        logger.warning(
+            "failed rendering jobDefinition %s for %s: %s",
+            definition_name,
+            repo_full_name,
+            exc,
+        )
+        return None
+
+    # overrides replace top-level fields of the rendered definition
+    return {**rendered, **copy.deepcopy(overrides)}
+
+
 def get_repo_runner_map() -> dict[str, dict[str, Any]]:
     global _repo_map
     global _repo_map_mtime
@@ -167,17 +237,22 @@ def get_repo_runner_map() -> dict[str, dict[str, Any]]:
     with config_file.open("r", encoding="utf-8") as handle:
         parsed = yaml.safe_load(handle) or {}
 
-    map_root = parsed.get("repositories") if isinstance(parsed, dict) else None
-    if not isinstance(map_root, dict):
+    repositories = parsed.get("repositories") if isinstance(parsed, dict) else None
+    definitions = parsed.get("jobDefinitions") if isinstance(parsed, dict) else None
+    if not isinstance(repositories, dict) or not isinstance(definitions, dict):
         logger.warning("invalid runner map structure in %s", RUNNER_MAP_PATH)
         _repo_map = {}
         _repo_map_mtime = stat.st_mtime
         return _repo_map
 
     normalized_map: dict[str, dict[str, Any]] = {}
-    for repo, raw_config in map_root.items():
+    for repo, repo_entry in repositories.items():
         if not isinstance(repo, str):
             logger.warning("invalid repository key in %s: %r", RUNNER_MAP_PATH, repo)
+            continue
+
+        raw_config = resolve_repo_config(repo, repo_entry, definitions)
+        if raw_config is None:
             continue
 
         normalized_config = normalize_repo_config(repo_full_name=repo, raw_config=raw_config)

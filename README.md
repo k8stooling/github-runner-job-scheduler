@@ -20,14 +20,32 @@ Example values snippet:
 ```yaml
 config:
     runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
+    jobDefinitions:
+        basic:
+            labels:
+                - "{{ runner_label }}"
+            registrationScope: repository
+            resources:
+                requests:
+                    cpu: "{{ cpu | default('250m') }}"
     repositories:
         k8stooling/repo:
-            labels:
-                - ubuntu-latest
-            registrationScope: repository
+            jobDefinition: basic
+            variables:
+                runner_label: ubuntu-latest
+            overrides:
+                serviceAccountName: custom
 ```
 
-Each repository entry is a hook configuration object.
+`jobDefinitions` is a dictionary of named job definitions. Each repository selects one
+with `jobDefinition: <key>` (required).
+
+- Definition string values are Jinja2 templates (sandboxed, undefined variables are an error and the repository is skipped).
+- A value that is exactly one `{{ expr }}` keeps its native type (list, number, boolean).
+- `variables`: per-repository values available to the templates. Built-ins: `repository`, `owner`, `repo_name`.
+- `overrides`: optional top-level fields that replace the rendered definition's fields for that repository (applied after rendering, not templated).
+
+A rendered job definition is a hook configuration object with these fields:
 
 - `labels`: string or list of labels passed to `config.sh --labels`
 - `registrationScope`: `repository` or `organization`
