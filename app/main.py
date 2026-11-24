@@ -44,10 +44,26 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 WEBHOOK_SECRET_REQUIRED = os.getenv("WEBHOOK_SECRET_REQUIRED", "true").lower() == "true"
 JOB_BACKOFF_LIMIT = int(os.getenv("JOB_BACKOFF_LIMIT", "10"))
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "86400"))
+RUNNER_WORK_VOLUME_TYPE = os.getenv("RUNNER_WORK_VOLUME_TYPE", "ephemeral").strip().lower()
+RUNNER_WORK_SIZE = os.getenv("RUNNER_WORK_SIZE", "20Gi")
+RUNNER_WORK_STORAGE_CLASS = os.getenv("RUNNER_WORK_STORAGE_CLASS", "").strip()
+RUNNER_WORK_ACCESS_MODE = os.getenv("RUNNER_WORK_ACCESS_MODE", "ReadWriteOnce")
 
 _batch_api: client.BatchV1Api | None = None
 _repo_map: dict[str, dict[str, Any]] = {}
 _repo_map_mtime: float | None = None
+
+
+def runner_work_volume() -> dict[str, Any]:
+    if RUNNER_WORK_VOLUME_TYPE != "ephemeral":
+        return {"name": "runner-work", "emptyDir": {}}
+    spec: dict[str, Any] = {
+        "accessModes": [RUNNER_WORK_ACCESS_MODE],
+        "resources": {"requests": {"storage": RUNNER_WORK_SIZE}},
+    }
+    if RUNNER_WORK_STORAGE_CLASS:
+        spec["storageClassName"] = RUNNER_WORK_STORAGE_CLASS
+    return {"name": "runner-work", "ephemeral": {"volumeClaimTemplate": {"spec": spec}}}
 
 
 def get_batch_api() -> client.BatchV1Api:
@@ -374,7 +390,7 @@ def build_job_manifest(
 
     volumes = [
         {"name": "runner-token", "emptyDir": {}},
-        {"name": "runner-work", "emptyDir": {}},
+        runner_work_volume(),
     ]
     volumes.extend(copy.deepcopy(hook_config.get("volumes", [])))
 

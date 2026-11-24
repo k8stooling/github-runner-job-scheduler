@@ -156,7 +156,7 @@ webhook:
 - `initContainer`: defaults to `ghcr.io/actions/runner-token:latest` (override with `INIT_CONTAINER_IMAGE`)
 - `runner container`: image from `RUNNER_IMAGE`
 - runner args include `--ephemeral --url <repo-or-org-target>`
-- base Job volumes always include `runner-token` and `runner-work`
+- base Job volumes always include `runner-token` and `runner-work` (a generic ephemeral PVC, 20Gi by default; configure via `job.workVolume.{type,size,storageClassName,accessMode}` in the chart, `type: emptyDir` restores the old behaviour)
 - additional pod fragments come from the matching repository hook entry
 
 ## Build

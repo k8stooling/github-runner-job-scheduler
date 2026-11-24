@@ -15,6 +15,12 @@ runner:
 job:
   backoffLimit: 5
   ttlSecondsAfterFinished: 3600
+  # runner-work volume (/_work): "ephemeral" = generic ephemeral PVC, "emptyDir" = node-local
+  workVolume:
+    type: ephemeral
+    size: 20Gi
+    storageClassName: ""   # empty = cluster default
+    accessMode: ReadWriteOnce
 
 config:
   runnerMapPath: /etc/github-runner-job-scheduler/repo-runner-map.yaml
